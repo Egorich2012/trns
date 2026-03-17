@@ -346,7 +346,7 @@ public:
 };
 
 
-int main(int argc, char** argv){
+int main(int argc, char** argv) {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 
@@ -360,7 +360,7 @@ int main(int argc, char** argv){
             input.assign(istreambuf_iterator<char>(cin), {});
         }
 
-        Scanner scanner(input);
+        Scanner scanner(input);  
         Parser parser(scanner);
         StmtP prog = parser.parse_program();
 
