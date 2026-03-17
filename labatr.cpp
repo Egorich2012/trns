@@ -1,683 +1,384 @@
-// синтаксический анализатор для управляющих конструкций и выражений
-// форма грамматики: контекстно-свободная (тип 2 по Хомскому)
-// <program> ::= <loop-construct>
-// <statement> ::= <loop-construct> | <output-construct> | <compound>
-// <compound> ::= "{" <statement-sequence> "}"
-// <statement-sequence> ::= ε | <statement> <statement-sequence>
-// <loop-construct> ::= "do" <statement> "while" "(" <expression> ")" ";"
-// <output-construct> ::= "print" "(" <argument-sequence> ")" ";"
-// <argument-sequence> ::= <expression> <argument-sequence-tail>
-// <argument-sequence-tail> ::= "," <expression> <argument-sequence-tail> | ε
-// <expression> ::= <prefix-operation> <expression-tail>
-// <expression-tail> ::= <comparison> <prefix-operation> | ε
-// <comparison> ::= "<" | ">"
-// <prefix-operation> ::= "++" <atomic> | "--" <atomic> | <atomic>
-// <atomic> ::= IDENTIFIER | NUMBER | "(" <expression> ")"
+// классический сканер и рекурсивный нисходящий предикативный распознаватель
+// Грамматика (БНФ):
+// <program> ::= <do-while-stmt>
+// <stmt> ::= <do-while-stmt> | <print-stmt> | <block>
+// <block> ::= "{" <stmt-list> "}"
+// <stmt-list> ::= e | <stmt> <stmt-list>
+// <do-while-stmt> ::= "do" <stmt> "while" "(" <expr> ")" ";"
+// <print-stmt> ::= "print" "(" <arg-list> ")" ";"
+// <arg-list> ::= <expr> <arg-list-tail>
+// <arg-list-tail> ::= "," <expr> <arg-list-tail> | e
+// <expr> ::= <unary> <expr-tail>
+// <expr-tail> ::= <relop> <unary> | e
+// <relop> ::= "<" | ">" 
+// <unary> ::= "++" <primary> | "--" <primary> | <primary>
+// <primary> ::= VAR | NUM | "(" <expr> ")"
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <memory>
-#include <cctype>
-#include <algorithm>
+#include <bits/stdc++.h>
+using namespace std;
 
-using std::string;
-using std::vector;
-using std::unordered_map;
-using std::unique_ptr;
-using std::make_unique;
-using std::cout;
-using std::cerr;
-
-
-enum class Category {
-    CYCLE_DO, CYCLE_WHILE, OUTPUT_PRINT,
-    BRACE_OPEN, BRACE_CLOSE, PAREN_OPEN, PAREN_CLOSE, TERMINATOR, SEPARATOR,
-    LESS, GREATER, INCREMENT, DECREMENT,
-    IDENTIFIER, CONSTANT,
-    END_MARKER
+enum class TokenType {
+    DO, WHILE, PRINT,
+    LBRACE, RBRACE, LPAREN, RPAREN, SEMI, COMMA,
+    LT, GT, INC, DEC,
+    VAR, NUM,
+    END
 };
 
-struct Lexeme {
-    Category kind;
-    string value;
-    int row;
-    int column;
+struct Token {
+    TokenType type;
+    string text;
+    int line;
+    int col;
 };
 
-struct ScanningError : std::exception {
-    string message;
-    int row;
-    int column;
-    
-    ScanningError(const string& msg, int r, int c) 
-        : message(msg), row(r), column(c) {}
-    
-    const char* what() const noexcept override {
-        return message.c_str();
-    }
+struct LexError : runtime_error {
+    int line, col;
+    LexError(const string &m, int l, int c): runtime_error(m), line(l), col(c) {}
 };
 
-
-class Tokenizer {
-    string source;
-    size_t position = 0;
-    int currentRow = 1;
-    int currentColumn = 1;
-    
+class Scanner {
+    string src;
+    size_t i = 0;
+    int line = 1, col = 1;
 public:
-    Tokenizer(const string& input) : source(input) {}
-    
-    bool isAtEnd() const {
-        return position >= source.length();
+    Scanner(const string &s): src(s) {}
+    bool eof() const { return i >= src.size(); }
+
+    int peekChar() const { return eof() ? EOF : (unsigned char)src[i]; }
+    int getChar() {
+        if (eof()) return EOF;
+        char c = src[i++];
+        if (c == '\n') { line++; col = 1; }
+        else col++;
+        return (unsigned char)c;
     }
-    
-    int lookAhead() const {
-        return isAtEnd() ? EOF : static_cast<unsigned char>(source[position]);
+    void ungetChar() {
+        if (i==0) return;
+        i--;
+        if (src[i] == '\n') { line--; col = 1; }
+        else col = max(1, col-1);
     }
-    
-    int fetchCharacter() {
-        if (isAtEnd()) return EOF;
-        char ch = source[position++];
-        if (ch == '\n') {
-            currentRow++;
-            currentColumn = 1;
-        } else {
-            currentColumn++;
-        }
-        return static_cast<unsigned char>(ch);
-    }
-    
-    void pushBack() {
-        if (position == 0) return;
-        position--;
-        if (source[position] == '\n') {
-            currentRow--;
-            currentColumn = 1;
-        } else {
-            currentColumn = std::max(1, currentColumn - 1);
-        }
-    }
-    
-    void skipWhitespace() {
-        while (!isAtEnd()) {
-            int ch = lookAhead();
-            if (std::isspace(ch)) {
-                fetchCharacter();
-                continue;
-            }
+
+    void skipWS() {
+        while (!eof()) {
+            int c = peekChar();
+            if (isspace(c)) { getChar(); continue; }
             break;
         }
     }
-    
-    Lexeme extractNext() {
-        skipWhitespace();
-        int startRow = currentRow;
-        int startColumn = currentColumn;
-        
-        if (isAtEnd()) {
-            return {Category::END_MARKER, "", startRow, startColumn};
+
+    Token nextToken() {
+        skipWS();
+        int startLine = line, startCol = col;
+        if (eof()) return {TokenType::END, "", startLine, startCol};
+        int c = getChar();
+
+        if (c == '+') {
+            if (peekChar() == '+') { getChar(); return {TokenType::INC, "++", startLine, startCol}; }
         }
-        
-        int ch = fetchCharacter();
-     
-        if (ch == '+') {
-            if (lookAhead() == '+') {
-                fetchCharacter();
-                return {Category::INCREMENT, "++", startRow, startColumn};
-            }
+        if (c == '-') {
+            if (peekChar() == '-') { getChar(); return {TokenType::DEC, "--", startLine, startCol}; }
         }
-        if (ch == '-') {
-            if (lookAhead() == '-') {
-                fetchCharacter();
-                return {Category::DECREMENT, "--", startRow, startColumn};
-            }
+        if (c == '{') return {TokenType::LBRACE, "{", startLine, startCol};
+        if (c == '}') return {TokenType::RBRACE, "}", startLine, startCol};
+        if (c == '(') return {TokenType::LPAREN, "(", startLine, startCol};
+        if (c == ')') return {TokenType::RPAREN, ")", startLine, startCol};
+        if (c == ';') return {TokenType::SEMI, ";", startLine, startCol};
+        if (c == ',') return {TokenType::COMMA, ",", startLine, startCol};
+        if (c == '<') return {TokenType::LT, "<", startLine, startCol};
+        if (c == '>') return {TokenType::GT, ">", startLine, startCol};
+
+        if (isalpha(c) || c=='_') {
+            string s; s.push_back((char)c);
+            while (isalnum(peekChar()) || peekChar()=='_') s.push_back((char)getChar());
+            if (s == "do") return {TokenType::DO, s, startLine, startCol};
+            if (s == "while") return {TokenType::WHILE, s, startLine, startCol};
+            if (s == "print") return {TokenType::PRINT, s, startLine, startCol};
+            return {TokenType::VAR, s, startLine, startCol};
         }
-        
-      
-        switch (ch) {
-            case '{': return {Category::BRACE_OPEN, "{", startRow, startColumn};
-            case '}': return {Category::BRACE_CLOSE, "}", startRow, startColumn};
-            case '(': return {Category::PAREN_OPEN, "(", startRow, startColumn};
-            case ')': return {Category::PAREN_CLOSE, ")", startRow, startColumn};
-            case ';': return {Category::TERMINATOR, ";", startRow, startColumn};
-            case ',': return {Category::SEPARATOR, ",", startRow, startColumn};
-            case '<': return {Category::LESS, "<", startRow, startColumn};
-            case '>': return {Category::GREATER, ">", startRow, startColumn};
+
+        if (isdigit(c)) {
+            string s; s.push_back((char)c);
+            while (isdigit(peekChar())) s.push_back((char)getChar());
+            return {TokenType::NUM, s, startLine, startCol};
         }
-        
-       
-        if (std::isalpha(ch) || ch == '_') {
-            string text;
-            text.push_back(static_cast<char>(ch));
-            while (std::isalnum(lookAhead()) || lookAhead() == '_') {
-                text.push_back(static_cast<char>(fetchCharacter()));
-            }
-            if (text == "do") return {Category::CYCLE_DO, text, startRow, startColumn};
-            if (text == "while") return {Category::CYCLE_WHILE, text, startRow, startColumn};
-            if (text == "print") return {Category::OUTPUT_PRINT, text, startRow, startColumn};
-            return {Category::IDENTIFIER, text, startRow, startColumn};
-        }
-     
-        if (std::isdigit(ch)) {
-            string text;
-            text.push_back(static_cast<char>(ch));
-            while (std::isdigit(lookAhead())) {
-                text.push_back(static_cast<char>(fetchCharacter()));
-            }
-            return {Category::CONSTANT, text, startRow, startColumn};
-        }
-        
-   
-        throw ScanningError(
-            string("недопустимый символ '") + static_cast<char>(ch) + "'", 
-            startRow, startColumn
-        );
+
+        throw LexError(string("Lexical error: unknown char '") + (char)c + "'", startLine, startCol);
     }
 };
 
 
-class RuntimeEnvironment {
-public:
-    unordered_map<string, int> storage;
-    
-    void signalError(const string& description, int row = -1, int col = -1) {
-        string fullMessage = "ошибка выполнения: " + description;
-        if (row >= 0) {
-            fullMessage += " (строка " + std::to_string(row) + 
-                          ", позиция " + std::to_string(col) + ")";
-        }
-        throw std::runtime_error(fullMessage);
+struct ExecContext {
+    unordered_map<string,int> vars;
+    void runtimeErr(const string &m, int line=-1, int col=-1) {
+        string s = "Runtime error: " + m;
+        if (line>=0) s += " at " + to_string(line) + ":" + to_string(col);
+        throw runtime_error(s);
     }
 };
 
-
-struct CalculationNode {
-    virtual ~CalculationNode() = default;
-    virtual int evaluate(RuntimeEnvironment& env) = 0;
+struct Expr {
+    virtual ~Expr() = default;
+    virtual int eval(ExecContext &ctx) = 0;
 };
 
-using CalculationPtr = unique_ptr<CalculationNode>;
+using ExprP = unique_ptr<Expr>;
 
-struct InstructionNode {
-    virtual ~InstructionNode() = default;
-    virtual void execute(RuntimeEnvironment& env) = 0;
+struct Stmt {
+    virtual ~Stmt() = default;
+    virtual void exec(ExecContext &ctx) = 0;
 };
 
-using InstructionPtr = unique_ptr<InstructionNode>;
+using StmtP = unique_ptr<Stmt>;
 
-
-class ConstantLeaf : public CalculationNode {
-    int value;
-public:
-    ConstantLeaf(int val) : value(val) {}
-    int evaluate(RuntimeEnvironment&) override {
-        return value;
+struct ENum : Expr {
+    int v; ENum(int x): v(x) {}
+    int eval(ExecContext&) override { return v; }
+};
+struct EVar : Expr {
+    string name; EVar(string s): name(move(s)) {}
+    int eval(ExecContext &ctx) override {
+        if (!ctx.vars.count(name)) ctx.vars[name] = 0;
+        return ctx.vars[name];
+    }
+};
+enum class UnOp { NONE, INC, DEC };
+struct EUnary : Expr {
+    UnOp op;
+    ExprP prim;
+    int line, col;
+    EUnary(UnOp o, ExprP p, int ln=0,int cc=0): op(o), prim(move(p)), line(ln), col(cc) {}
+    int eval(ExecContext &ctx) override {
+        if (op == UnOp::NONE) return prim->eval(ctx);
+        EVar* vptr = dynamic_cast<EVar*>(prim.get());
+        if (!vptr) ctx.runtimeErr("prefix ++/-- applied to non-variable", line, col);
+        int &slot = ctx.vars[vptr->name]; 
+        if (op == UnOp::INC) ++slot; else --slot;
+        return slot;
+    }
+};
+struct ERel : Expr {
+    ExprP left; ExprP right; char op;
+    ERel(ExprP l,char o,ExprP r): left(move(l)), right(move(r)), op(o) {}
+    int eval(ExecContext &ctx) override {
+        int L = left->eval(ctx), R = right->eval(ctx);
+        if (op == '<') return L < R;
+        return L > R;
     }
 };
 
-
-class VariableLeaf : public CalculationNode {
-    string identifier;
-public:
-    VariableLeaf(string id) : identifier(std::move(id)) {}
-    int evaluate(RuntimeEnvironment& env) override {
-        if (!env.storage.count(identifier)) {
-            env.storage[identifier] = 0;
-        }
-        return env.storage[identifier];
-    }
-};
-
-
-enum class PrefixOperator { PLAIN, INCREASE, DECREASE };
-
-
-class PrefixExpression : public CalculationNode {
-    PrefixOperator operation;
-    CalculationPtr operand;
-    int errorRow;
-    int errorCol;
-    
-public:
-    PrefixExpression(PrefixOperator op, CalculationPtr arg, int row = 0, int col = 0)
-        : operation(op), operand(std::move(arg)), errorRow(row), errorCol(col) {}
-    
-    int evaluate(RuntimeEnvironment& env) override {
-        if (operation == PrefixOperator::PLAIN) {
-            return operand->evaluate(env);
-        }
-
-        auto* variableNode = dynamic_cast<VariableLeaf*>(operand.get());
-        if (!variableNode) {
-            env.signalError("++/-- можно применять только к переменным", 
-                          errorRow, errorCol);
-        }
-        
-        int& storageLocation = env.storage[variableNode->identifier];
-        if (operation == PrefixOperator::INCREASE) {
-            return ++storageLocation;
-        } else {
-            return --storageLocation;
-        }
-    }
-};
-
-class ComparisonExpression : public CalculationNode {
-    CalculationPtr leftSide;
-    CalculationPtr rightSide;
-    char comparator;
-    
-public:
-    ComparisonExpression(CalculationPtr left, char comp, CalculationPtr right)
-        : leftSide(std::move(left)), comparator(comp), rightSide(std::move(right)) {}
-    
-    int evaluate(RuntimeEnvironment& env) override {
-        int leftValue = leftSide->evaluate(env);
-        int rightValue = rightSide->evaluate(env);
-        return (comparator == '<') ? (leftValue < rightValue) : (leftValue > rightValue);
-    }
-};
-
-
-class PrintInstruction : public InstructionNode {
-    vector<CalculationPtr> arguments;
-    int errorRow;
-    int errorCol;
-    
-public:
-    PrintInstruction(vector<CalculationPtr> args, int row, int col)
-        : arguments(std::move(args)), errorRow(row), errorCol(col) {}
-    
-    void execute(RuntimeEnvironment& env) override {
-        bool firstElement = true;
-        for (auto& expr : arguments) {
-            int value = expr->evaluate(env);
-            if (!firstElement) {
-                cout << " ";
-            }
-            cout << value;
-            firstElement = false;
+struct SPrint : Stmt {
+    vector<ExprP> args; int line,col;
+    SPrint(vector<ExprP> a,int ln,int cc): args(move(a)), line(ln), col(cc) {}
+    void exec(ExecContext &ctx) override {
+        bool first = true;
+        for (auto &e : args) {
+            int v = e->eval(ctx);
+            if (!first) cout << " ";
+            cout << v;
+            first = false;
         }
         cout << "\n";
     }
 };
-
-
-class BlockInstruction : public InstructionNode {
-    vector<InstructionPtr> instructions;
-    
-public:
-    BlockInstruction(vector<InstructionPtr> stmts) : instructions(std::move(stmts)) {}
-    
-    void execute(RuntimeEnvironment& env) override {
-        for (auto& stmt : instructions) {
-            stmt->execute(env);
-        }
+struct SBlock : Stmt {
+    vector<StmtP> stmts;
+    SBlock(vector<StmtP> v): stmts(move(v)) {}
+    void exec(ExecContext &ctx) override {
+        for (auto &s : stmts) s->exec(ctx);
     }
 };
-
-
-class DoWhileLoop : public InstructionNode {
-    InstructionPtr loopBody;
-    CalculationPtr loopCondition;
-    
-public:
-    DoWhileLoop(InstructionPtr body, CalculationPtr condition)
-        : loopBody(std::move(body)), loopCondition(std::move(condition)) {}
-    
-    void execute(RuntimeEnvironment& env) override {
+struct SDoWhile : Stmt {
+    StmtP body; ExprP cond;
+    SDoWhile(StmtP b, ExprP c): body(move(b)), cond(move(c)) {}
+    void exec(ExecContext &ctx) override {
         do {
-            loopBody->execute(env);
-        } while (loopCondition->evaluate(env));
+            body->exec(ctx);
+        } while (cond->eval(ctx));
     }
 };
 
 
-struct SyntaxError : std::exception {
-    string message;
-    int row;
-    int column;
-    
-    SyntaxError(const string& msg, int r, int c) 
-        : message(msg), row(r), column(c) {}
-    
-    const char* what() const noexcept override {
-        return message.c_str();
-    }
+struct ParseError : runtime_error {
+    int line, col;
+    ParseError(const string &m,int l,int c): runtime_error(m), line(l), col(c) {}
 };
 
+class Parser {
+    Scanner &sc;
+    Token look;
+    bool hasLook = false;
 
-class SyntaxAnalyzer {
-    Tokenizer& tokenSource;
-    Lexeme currentToken;
-    bool tokenCached = false;
-    
-    Lexeme retrieveToken() {
-        return tokenSource.extractNext();
-    }
-    
-    void advance() {
-        currentToken = retrieveToken();
-        tokenCached = true;
-    }
-    
-    void consumeToken() {
-        tokenCached = false;
-    }
-    
-    void verify(Category expected, const string& hint = "") {
-        if (!tokenCached) {
-            advance();
+    Token nextTok() { return sc.nextToken(); }
+    void read() { look = nextTok(); hasLook = true; }
+    void consume() { hasLook = false; }
+    void expect(TokenType t, const string &msg="") {
+        if (!hasLook) read();
+        if (look.type != t) {
+            string want = msg.empty() ? tokenName(t) : msg;
+            throw ParseError("Expected " + want + ", got '" + look.text + "'", look.line, look.col);
         }
-        if (currentToken.kind != expected) {
-            string expectation = hint.empty() ? describeCategory(expected) : hint;
-            throw SyntaxError(
-                "ожидается " + expectation + ", получено '" + currentToken.value + "'",
-                currentToken.row,
-                currentToken.column
-            );
-        }
-        consumeToken();
+        consume();
     }
-    
-    static string describeCategory(Category cat) {
-        switch(cat) {
-            case Category::CYCLE_DO: return "'do'";
-            case Category::CYCLE_WHILE: return "'while'";
-            case Category::OUTPUT_PRINT: return "'print'";
-            case Category::BRACE_OPEN: return "'{'";
-            case Category::BRACE_CLOSE: return "'}'";
-            case Category::PAREN_OPEN: return "'('";
-            case Category::PAREN_CLOSE: return "')'";
-            case Category::TERMINATOR: return "';'";
-            case Category::SEPARATOR: return "','";
-            case Category::LESS: return "'<'";
-            case Category::GREATER: return "'>'";
-            case Category::INCREMENT: return "'++'";
-            case Category::DECREMENT: return "'--'";
-            case Category::IDENTIFIER: return "идентификатор";
-            case Category::CONSTANT: return "число";
-            case Category::END_MARKER: return "конец файла";
-            default: return "токен";
+
+    static string tokenName(TokenType t) {
+        switch(t){
+            case TokenType::DO: return "'do'"; case TokenType::WHILE: return "'while'"; case TokenType::PRINT: return "'print'";
+            case TokenType::LBRACE: return "'{'"; case TokenType::RBRACE: return "'}'"; case TokenType::LPAREN: return "'('";
+            case TokenType::RPAREN: return "')'"; case TokenType::SEMI: return "';'"; case TokenType::COMMA: return "','";
+            case TokenType::LT: return "'<'"; case TokenType::GT: return "'>'"; case TokenType::INC: return "'++'"; case TokenType::DEC: return "'--'";
+            case TokenType::VAR: return "VAR"; case TokenType::NUM: return "NUM"; case TokenType::END: return "EOF";
         }
+        return "TOKEN";
     }
-    
+
 public:
-    SyntaxAnalyzer(Tokenizer& src) : tokenSource(src) {
-        advance();
-    }
-    
-    // главная точка входа: <program> ::= <do-while-stmt>
-    InstructionPtr parseWholeProgram() {
-        InstructionPtr result = parseDoWhileConstruct();
-        if (tokenCached && currentToken.kind != Category::END_MARKER) {
-            throw SyntaxError(
-                "лишние символы после завершения программы",
-                currentToken.row,
-                currentToken.column
-            );
+    Parser(Scanner &s): sc(s) { read(); }
+
+    StmtP parse_program() {
+        StmtP s = parse_do_while_stmt();
+        if (hasLook && look.type != TokenType::END) {
+            throw ParseError("Extra tokens after program", look.line, look.col);
         }
-        return result;
-    }
-    
-    InstructionPtr parseAnyStatement() {
-        if (!tokenCached) {
-            advance();
-        }
-        
-        if (currentToken.kind == Category::CYCLE_DO) {
-            return parseDoWhileConstruct();
-        }
-        if (currentToken.kind == Category::OUTPUT_PRINT) {
-            return parsePrintConstruct();
-        }
-        if (currentToken.kind == Category::BRACE_OPEN) {
-            return parseBlockConstruct();
-        }
-        
-        throw SyntaxError(
-            "ожидается инструкция (do, print или '{')",
-            currentToken.row,
-            currentToken.column
-        );
+        return s;
     }
 
-    InstructionPtr parseBlockConstruct() {
-        verify(Category::BRACE_OPEN);
-        
-        vector<InstructionPtr> sequence;
-        while (true) {
-            if (!tokenCached) {
-                advance();
-            }
-            if (currentToken.kind == Category::BRACE_CLOSE) {
-                break;
-            }
-            sequence.push_back(parseAnyStatement());
-        }
-        
-        verify(Category::BRACE_CLOSE);
-        return make_unique<BlockInstruction>(std::move(sequence));
+    StmtP parse_stmt() {
+        if (!hasLook) read();
+        if (look.type == TokenType::DO) return parse_do_while_stmt();
+        if (look.type == TokenType::PRINT) return parse_print_stmt();
+        if (look.type == TokenType::LBRACE) return parse_block();
+        throw ParseError("Expected statement (do/print/{)", look.line, look.col);
     }
-    
-  
-    InstructionPtr parseDoWhileConstruct() {
-        Lexeme startToken = currentToken;
-        verify(Category::CYCLE_DO);
-        
-        InstructionPtr body = parseAnyStatement();
-        
-        if (!tokenCached) {
-            advance();
-        }
-        if (currentToken.kind != Category::CYCLE_WHILE) {
-            throw SyntaxError(
-                "после тела цикла ожидается 'while'",
-                currentToken.row,
-                currentToken.column
-            );
-        }
-        
-        verify(Category::CYCLE_WHILE);
-        verify(Category::PAREN_OPEN);
-        CalculationPtr condition = parseExpression();
-        verify(Category::PAREN_CLOSE);
-        verify(Category::TERMINATOR);
-        
-        return make_unique<DoWhileLoop>(std::move(body), std::move(condition));
-    }
-    
-  
-    InstructionPtr parsePrintConstruct() {
-        Lexeme startToken = currentToken;
-        verify(Category::OUTPUT_PRINT);
-        verify(Category::PAREN_OPEN);
-        
-        if (!tokenCached) {
-            advance();
-        }
-        
-   
-        bool canStartExpression = 
-            currentToken.kind == Category::INCREMENT ||
-            currentToken.kind == Category::DECREMENT ||
-            currentToken.kind == Category::IDENTIFIER ||
-            currentToken.kind == Category::CONSTANT ||
-            currentToken.kind == Category::PAREN_OPEN;
-            
-        if (!canStartExpression) {
-            throw SyntaxError(
-                "print: ожидается выражение",
-                currentToken.row,
-                currentToken.column
-            );
-        }
-        
-        vector<CalculationPtr> arguments;
-        arguments.push_back(parseExpression());
-        
+
+    StmtP parse_block() {
+        expect(TokenType::LBRACE);
+        vector<StmtP> v;
         while (true) {
-            if (!tokenCached) {
-                advance();
-            }
-            if (currentToken.kind == Category::SEPARATOR) {
-                verify(Category::SEPARATOR);
-                arguments.push_back(parseExpression());
-                continue;
-            }
+            if (!hasLook) read();
+            if (look.type == TokenType::RBRACE) break;
+            v.push_back(parse_stmt());
+        }
+        expect(TokenType::RBRACE);
+        return make_unique<SBlock>(move(v));
+    }
+
+    StmtP parse_do_while_stmt() {
+        Token t = look;
+        expect(TokenType::DO);
+        StmtP body = parse_stmt();
+        if (!hasLook) read();
+        if (look.type != TokenType::WHILE) throw ParseError("Expected 'while' after do body", look.line, look.col);
+        expect(TokenType::WHILE);
+        expect(TokenType::LPAREN);
+        ExprP cond = parse_expr();
+        expect(TokenType::RPAREN);
+        expect(TokenType::SEMI);
+        return make_unique<SDoWhile>(move(body), move(cond));
+    }
+
+    StmtP parse_print_stmt() {
+        Token t = look;
+        expect(TokenType::PRINT);
+        expect(TokenType::LPAREN);
+        if (!hasLook) read();
+        if (!(look.type==TokenType::INC || look.type==TokenType::DEC || look.type==TokenType::VAR || look.type==TokenType::NUM || look.type==TokenType::LPAREN))
+            throw ParseError("print: expected expression", look.line, look.col);
+        vector<ExprP> args;
+        args.push_back(parse_expr());
+        while (true) {
+            if (!hasLook) read();
+            if (look.type == TokenType::COMMA) { expect(TokenType::COMMA); args.push_back(parse_expr()); continue; }
             break;
         }
-        
-        verify(Category::PAREN_CLOSE);
-        verify(Category::TERMINATOR);
-        
-        return make_unique<PrintInstruction>(
-            std::move(arguments), 
-            startToken.row, 
-            startToken.column
-        );
+        expect(TokenType::RPAREN);
+        expect(TokenType::SEMI);
+        return make_unique<SPrint>(move(args), t.line, t.col);
     }
-    
-   
-    CalculationPtr parseExpression() {
-        CalculationPtr leftPart = parseUnaryOperation();
-        
-        if (!tokenCached) {
-            advance();
+
+    ExprP parse_expr() {
+        ExprP left = parse_unary();
+        if (!hasLook) read();
+        if (look.type == TokenType::LT || look.type == TokenType::GT) {
+            char op = (look.type==TokenType::LT)?'<':'>';
+            consume();
+            ExprP right = parse_unary();
+            return make_unique<ERel>(move(left), op, move(right));
         }
-        
-        if (currentToken.kind == Category::LESS || 
-            currentToken.kind == Category::GREATER) {
-            char comparisonOp = (currentToken.kind == Category::LESS) ? '<' : '>';
-            consumeToken();
-            CalculationPtr rightPart = parseUnaryOperation();
-            return make_unique<ComparisonExpression>(
-                std::move(leftPart), comparisonOp, std::move(rightPart)
-            );
-        }
-        
-        return leftPart;
+        return left;
     }
-   
-    CalculationPtr parseUnaryOperation() {
-        if (!tokenCached) {
-            advance();
+
+    ExprP parse_unary() {
+        if (!hasLook) read();
+        if (look.type == TokenType::INC) {
+            Token t = look; expect(TokenType::INC);
+            ExprP p = parse_primary();
+            return make_unique<EUnary>(UnOp::INC, move(p), t.line, t.col);
         }
-        
-        if (currentToken.kind == Category::INCREMENT) {
-            Lexeme opToken = currentToken;
-            verify(Category::INCREMENT);
-            CalculationPtr atomic = parseAtomicElement();
-            return make_unique<PrefixExpression>(
-                PrefixOperator::INCREASE, 
-                std::move(atomic),
-                opToken.row,
-                opToken.column
-            );
+        if (look.type == TokenType::DEC) {
+            Token t = look; expect(TokenType::DEC);
+            ExprP p = parse_primary();
+            return make_unique<EUnary>(UnOp::DEC, move(p), t.line, t.col);
         }
-        
-        if (currentToken.kind == Category::DECREMENT) {
-            Lexeme opToken = currentToken;
-            verify(Category::DECREMENT);
-            CalculationPtr atomic = parseAtomicElement();
-            return make_unique<PrefixExpression>(
-                PrefixOperator::DECREASE, 
-                std::move(atomic),
-                opToken.row,
-                opToken.column
-            );
-        }
-        
-        CalculationPtr atomic = parseAtomicElement();
-        return make_unique<PrefixExpression>(
-            PrefixOperator::PLAIN, 
-            std::move(atomic)
-        );
+        ExprP p = parse_primary();
+        return make_unique<EUnary>(UnOp::NONE, move(p));
     }
-    
- 
-    CalculationPtr parseAtomicElement() {
-        if (!tokenCached) {
-            advance();
+
+    ExprP parse_primary() {
+        if (!hasLook) read();
+        if (look.type == TokenType::VAR) {
+            string name = look.text; consume();
+            return make_unique<EVar>(move(name));
         }
-        
-        if (currentToken.kind == Category::IDENTIFIER) {
-            string name = currentToken.value;
-            consumeToken();
-            return make_unique<VariableLeaf>(name);
+        if (look.type == TokenType::NUM) {
+            int v = stoi(look.text); consume();
+            return make_unique<ENum>(v);
         }
-        
-        if (currentToken.kind == Category::CONSTANT) {
-            int numericValue = std::stoi(currentToken.value);
-            consumeToken();
-            return make_unique<ConstantLeaf>(numericValue);
+        if (look.type == TokenType::LPAREN) {
+            consume();
+            ExprP e = parse_expr();
+            expect(TokenType::RPAREN);
+            return e;
         }
-        
-        if (currentToken.kind == Category::PAREN_OPEN) {
-            consumeToken();
-            CalculationPtr enclosed = parseExpression();
-            verify(Category::PAREN_CLOSE);
-            return enclosed;
-        }
-        
-        throw SyntaxError(
-            "ожидается идентификатор, число или '('",
-            currentToken.row,
-            currentToken.column
-        );
+        throw ParseError("Expected primary (VAR, NUM, or '(')", look.line, look.col);
     }
 };
 
 
-int main(int argc, char** argv) {
-    std::ios::sync_with_stdio(false);
-    
+int main(int argc, char** argv){
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+
     try {
-        string programSource;
-        
+        string input;
         if (argc >= 2) {
-            std::ifstream sourceFile(argv[1]);
-            if (!sourceFile) {
-                cerr << "невозможно открыть файл: " << argv[1] << "\n";
-                return 1;
-            }
-            programSource.assign(
-                std::istreambuf_iterator<char>(sourceFile),
-                std::istreambuf_iterator<char>()
-            );
+            ifstream f(argv[1]);
+            if (!f) { cerr << "Cannot open file: " << argv[1] << "\n"; return 1; }
+            input.assign(istreambuf_iterator<char>(f), {});
         } else {
-            programSource.assign(
-                std::istreambuf_iterator<char>(std::cin),
-                std::istreambuf_iterator<char>()
-            );
+            input.assign(istreambuf_iterator<char>(cin), {});
         }
-        
-        Tokenizer tokenizer(programSource);
-        SyntaxAnalyzer parser(tokenizer);
-        InstructionPtr program = parser.parseWholeProgram();
-        
-        RuntimeEnvironment environment;
-        program->execute(environment);
-        
+
+        Scanner scanner(input);
+        Parser parser(scanner);
+        StmtP prog = parser.parse_program();
+
+        ExecContext ctx;
+        prog->exec(ctx);
         return 0;
-        
-    } catch (const ScanningError& se) {
-        cerr << "лексическая ошибка в " << se.row << ":" << se.column 
-             << " - " << se.what() << "\n";
+
+    } catch (LexError &le) {
+        cerr << "Lexical error at " << le.line << ":" << le.col << " - " << le.what() << "\n";
         return 1;
-    } catch (const SyntaxError& se) {
-        cerr << "синтаксическая ошибка в " << se.row << ":" << se.column 
-             << " - " << se.what() << "\n";
+    } catch (ParseError &pe) {
+        cerr << "Syntax error at " << pe.line << ":" << pe.col << " - " << pe.what() << "\n";
         return 1;
-    } catch (const std::runtime_error& re) {
+    } catch (runtime_error &re) {
         cerr << re.what() << "\n";
         return 1;
-    } catch (const std::exception& e) {
-        cerr << "ошибка: " << e.what() << "\n";
+    } catch (exception &e) {
+        cerr << "Error: " << e.what() << "\n";
         return 1;
     }
 }
