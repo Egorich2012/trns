@@ -1,0 +1,3 @@
+do
+    print(x)
+while (x < 10);
